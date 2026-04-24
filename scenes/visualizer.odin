@@ -1,20 +1,8 @@
-#+feature using-stmt
+package scenes
 
-package main
-
-import "core:c"
 import "core:math"
 import "core:math/cmplx"
 import sdl "vendor:sdl3"
-
-/* Globals */
-
-APP_NAME :: "viz"
-
-WINDOW_WIDTH :: 800
-WINDOW_HEIGHT :: 800
-WINDOW_CENTER_X :: f32(WINDOW_WIDTH) / 2
-WINDOW_CENTER_Y :: f32(WINDOW_HEIGHT) / 2
 
 SAMPLE_RATE :: 44100
 NUM_SAMPLES :: 1024 // must be power of 2 for FFT
@@ -39,69 +27,31 @@ NUM_MAGNITUDES :: NUM_BANDS / BAND_WINDOW
 VISUAL_SMOOTHING :: 0.9
 COLOR_CHANGE_RATE :: 0.2
 
-window: ^sdl.Window
-renderer: ^sdl.Renderer
 audio_spec := sdl.AudioSpec {
 	format   = .F32,
 	channels = 1,
 	freq     = SAMPLE_RATE,
 }
 
-AppState :: struct {
-	audio:      struct {
+Visualizer_State :: struct {
+	audio: struct {
 		stream:     ^sdl.AudioStream,
 		buffer:     [NUM_SAMPLES]f32,
 		fft_buffer: [NUM_SAMPLES]complex64,
 		bands:      [NUM_BANDS]f32,
 	},
-	visualizer: struct {
+	video: struct {
+		center:     sdl.Point,
 		magnitudes: [NUM_MAGNITUDES]f32,
 		points:     [NUM_MAGNITUDES * 2]sdl.FPoint, // normal + mirrored points
 	},
 }
 
-/* Functions */
-
-main :: proc() {
+visualizer_init :: proc(window_size: sdl.Point) -> Visualizer_State {
 	assert(NUM_BANDS % BAND_WINDOW == 0)
 
-	sdl.EnterAppMainCallbacks(0, nil, app_init, app_iterate, app_event, app_quit)
-}
-
-app_init :: proc "c" (appstate: ^rawptr, argc: c.int, argv: [^]cstring) -> sdl.AppResult {
-	sdl.Log("Initializing %s...\n", APP_NAME)
-	if ok := sdl.SetAppMetadata(APP_NAME, "1.0", "me.ritam.clock.viz"); !ok {
-		sdl.Log("Failed to set app metadata: %s", sdl.GetError())
-		return .FAILURE
-	}
-
-	appstate^ = sdl.malloc(size_of(AppState))
-	if appstate == nil {
-		sdl.Log("Failed to initialize app state\n")
-		return .FAILURE
-	}
-
-	state := cast(^AppState)appstate^
-
-	if ok := sdl.Init({.VIDEO, .AUDIO}); !ok {
-		sdl.Log("Failed to initialize SDL: %s\n", sdl.GetError())
-		return .FAILURE
-	}
-
-	if ok := sdl.CreateWindowAndRenderer(
-		APP_NAME,
-		WINDOW_WIDTH,
-		WINDOW_HEIGHT,
-		{.HIGH_PIXEL_DENSITY},
-		&window,
-		&renderer,
-	); !ok {
-		sdl.Log("Failed to create window or renderer: %s", sdl.GetError())
-		return .FAILURE
-	}
-
-	sdl.SetRenderVSync(renderer, 1)
-	sdl.SetRenderLogicalPresentation(renderer, WINDOW_WIDTH, WINDOW_HEIGHT, .LETTERBOX)
+	state := Visualizer_State{}
+	state.video.center = window_size / 2
 
 	state.audio.stream = sdl.OpenAudioDeviceStream(
 		sdl.AUDIO_DEVICE_DEFAULT_RECORDING,
@@ -113,35 +63,34 @@ app_init :: proc "c" (appstate: ^rawptr, argc: c.int, argv: [^]cstring) -> sdl.A
 	// Device starts paused, so must be manually started
 	sdl.ResumeAudioStreamDevice(state.audio.stream)
 
-	return .CONTINUE
+	return state
 }
 
-app_iterate :: proc "c" (appstate: rawptr) -> sdl.AppResult {
-	state := cast(^AppState)appstate
-
+visualizer_iterate :: proc(state: ^Visualizer_State, renderer: ^sdl.Renderer) -> sdl.AppResult {
 	/* Audio Processing */
 	{
-		using state.audio
+		audio := &state.audio
 
-		if sdl.GetAudioStreamAvailable(stream) >= NUM_SAMPLE_BYTES {
-			sdl.GetAudioStreamData(stream, &buffer, NUM_SAMPLE_BYTES)
-			mean := math.sum(buffer[:]) / NUM_SAMPLES
+		if sdl.GetAudioStreamAvailable(audio.stream) >= NUM_SAMPLE_BYTES {
+			sdl.GetAudioStreamData(audio.stream, &audio.buffer, NUM_SAMPLE_BYTES)
+			mean := math.sum(audio.buffer[:]) / NUM_SAMPLES
 
 			// Preprocess samples
 			for i in 0 ..< NUM_SAMPLES {
 				// Subtract mean to remove DC bias
-				buffer[i] -= mean
+				audio.buffer[i] -= mean
 
 				// Apply Hann window to reduce spectral leakage
-				buffer[i] *= 0.5 * (1 - math.cos(2 * math.PI * f32(i) / f32(NUM_SAMPLES - 1)))
+				audio.buffer[i] *=
+					0.5 * (1 - math.cos(2 * math.PI * f32(i) / f32(NUM_SAMPLES - 1)))
 
 				// Convert to complex number
-				fft_buffer[i] = complex(buffer[i], 0)
+				audio.fft_buffer[i] = complex(audio.buffer[i], 0)
 			}
 
-			fft(fft_buffer[:])
+			fft(audio.fft_buffer[:])
 
-			for value, i in fft_buffer[LOW_CUTOFF:HIGH_CUTOFF] {
+			for value, i in audio.fft_buffer[LOW_CUTOFF:HIGH_CUTOFF] {
 				real := cmplx.real(value)
 				imag := cmplx.imag(value)
 				magnitude := math.sqrt(real * real + imag * imag)
@@ -151,7 +100,7 @@ app_iterate :: proc "c" (appstate: rawptr) -> sdl.AppResult {
 				power = (power - MIN_DB) * INVERSE_RANGE
 
 				if power < SILENCE_THRESHOLD {
-					bands[i] = SILENCE_THRESHOLD
+					audio.bands[i] = SILENCE_THRESHOLD
 					continue
 				}
 
@@ -159,35 +108,34 @@ app_iterate :: proc "c" (appstate: rawptr) -> sdl.AppResult {
 
 				// Frequency-dependent scaling
 				power *= 1 + math.pow(f32(i) / (NUM_BANDS - 1), FREQUENCY_SCALING)
-				bands[i] = AUDIO_SMOOTHING * bands[i] + (1 - AUDIO_SMOOTHING) * power}
+				audio.bands[i] = AUDIO_SMOOTHING * audio.bands[i] + (1 - AUDIO_SMOOTHING) * power}
 		}
 	}
 
 	/* Visualizer */
 	{
-		using state.visualizer
-
+		video := &state.video
 		bands := state.audio.bands
 		total_angle: f32 = math.PI / NUM_MAGNITUDES
 
 		sdl.SetRenderDrawColor(renderer, 0, 0, 0, sdl.ALPHA_OPAQUE)
 		sdl.RenderClear(renderer)
 
-		for &magnitude, i in magnitudes {
+		for &magnitude, i in video.magnitudes {
 			start := i * BAND_WINDOW
 			end := start + BAND_WINDOW
 			value := math.sum(bands[start:end]) / BAND_WINDOW
 
-			point := &points[i]
-			mirror := &points[len(points) - i - 1]
+			point := &video.points[i]
+			mirror := &video.points[len(video.points) - i - 1]
 
 			magnitude = VISUAL_SMOOTHING * magnitude + (1 - VISUAL_SMOOTHING) * value * MAX_RADIUS
 			angle := f32(i) * total_angle
 
-			point.x = WINDOW_CENTER_X + math.sin(angle) * (MIN_RADIUS + magnitude)
-			point.y = WINDOW_CENTER_Y + math.cos(angle) * (MIN_RADIUS + magnitude)
+			point.x = f32(video.center.x) + math.sin(angle) * (MIN_RADIUS + magnitude)
+			point.y = f32(video.center.y) + math.cos(angle) * (MIN_RADIUS + magnitude)
 
-			mirror.x = 2 * WINDOW_CENTER_X - point.x
+			mirror.x = 2 * f32(video.center.x) - point.x
 			mirror.y = point.y
 		}
 
@@ -197,33 +145,16 @@ app_iterate :: proc "c" (appstate: rawptr) -> sdl.AppResult {
 		b := f32(0.5 + 0.5 * math.sin(now + math.PI * 4 / 3))
 		sdl.SetRenderDrawColorFloat(renderer, r, g, b, sdl.ALPHA_OPAQUE_FLOAT)
 
-		sdl.RenderLines(renderer, raw_data(points[:]), len(points))
+		sdl.RenderLines(renderer, raw_data(video.points[:]), len(video.points))
 		sdl.RenderPresent(renderer)
 	}
 
 	return .CONTINUE
 }
 
-app_event :: proc "c" (appstate: rawptr, event: ^sdl.Event) -> sdl.AppResult {
-	#partial switch event.type {
-	case .QUIT, .WINDOW_CLOSE_REQUESTED:
-		return .SUCCESS
-	}
-
-	return .CONTINUE
-}
-
-app_quit :: proc "c" (appstate: rawptr, result: sdl.AppResult) {
-	state := cast(^AppState)appstate
-
-	sdl.Log("Quitting %s with result %d", APP_NAME, result)
-
+visualizer_quit :: proc(state: Visualizer_State) {
+	sdl.Log("Quitting visualizer scene")
 	sdl.DestroyAudioStream(state.audio.stream)
-	sdl.DestroyRenderer(renderer)
-	sdl.DestroyWindow(window)
-	sdl.Quit()
-
-	sdl.free(appstate)
 }
 
 /* Fast Fourier Transform */

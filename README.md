@@ -1,12 +1,11 @@
-## Introduction
+# Portal
 
-This is a collection of various programs to run on a custom built digital "clock".
+A collection of various programs that run on a custom display.
 
 ## Installation
 
-These are instructions to build and deploy to a Raspberry Pi.
+To build and deploy to a Raspberry Pi:
 
 1. Install [Odin](https://odin-lang.org/) compiler on local machine.
 2. Install `libsdl3-dev` dependencies on the Raspberry Pi.
-3. Run `make deploy PROGRAM` for the desired program.
-4. Run the executable via SSH.
+3. Run `make deploy`.

@@ -2,6 +2,7 @@ package main
 
 import "base:runtime"
 import "core:c"
+import "core:net"
 import "scenes"
 import sdl "vendor:sdl3"
 
@@ -9,18 +10,24 @@ APP_NAME :: "portal"
 APP_ID :: "me.ritam.portal"
 WINDOW_SIZE :: sdl.Point{800, 800}
 
-Scene :: union {
+Scene :: enum c.int {
+	Idle,
+	Clock,
+	Visualizer,
+}
+
+Scene_State :: union {
 	scenes.Idle_State,
 	scenes.Clock_State,
 	scenes.Visualizer_State,
 }
 
 App_State :: struct {
-	window:            ^sdl.Window,
-	renderer:          ^sdl.Renderer,
-	current_scene:     Scene,
-	next_scene:        Maybe(Scene),
-	controller_thread: sdl.Thread,
+	window:        ^sdl.Window,
+	renderer:      ^sdl.Renderer,
+	scene:         sdl.AtomicInt,
+	scene_state:   Scene_State,
+	server_thread: ^sdl.Thread,
 }
 
 main :: proc() {
@@ -43,6 +50,7 @@ app_init :: proc "c" (appstate: ^rawptr, argc: c.int, argv: [^]cstring) -> sdl.A
 	}
 
 	state := cast(^App_State)appstate^
+	state.server_thread = sdl.CreateThread(start_server, "Server_Thread", state)
 
 	if ok := sdl.Init({.VIDEO, .AUDIO}); !ok {
 		sdl.Log("Failed to initialize SDL: %s\n", sdl.GetError())
@@ -64,30 +72,83 @@ app_init :: proc "c" (appstate: ^rawptr, argc: c.int, argv: [^]cstring) -> sdl.A
 	sdl.SetRenderVSync(state.renderer, 1)
 	sdl.SetRenderLogicalPresentation(state.renderer, WINDOW_SIZE.x, WINDOW_SIZE.y, .LETTERBOX)
 
-	// Initialize the default idle state
-	state.current_scene = scenes.idle_init(state.renderer)
-
-	// sdl.CreateThread(, "")
-
-	// TODO: create a networking thread that listens for command to change
-	// If there i a valid command, Push the change event as a Keyboardevent?
-	// event := sdl.Event{.USER, C}
-	// sdl.PushEvent()
+	_ = sdl.SetAtomicInt(&state.scene, i32(Scene.Idle))
 
 	return .CONTINUE
+}
+
+start_server :: proc "c" (data: rawptr) -> c.int {
+	context = runtime.default_context()
+	state := cast(^App_State)data
+
+	socket, err := net.listen_tcp({address = net.IP4_Address{0, 0, 0, 0}, port = 9041})
+	if err != nil {
+		sdl.Log("Failed to start TCP listener")
+		return -1
+	}
+
+	sdl.Log("Started TCP server")
+
+	buffer: [4]u8
+
+	for {
+		client, _, err_accept := net.accept_tcp(socket)
+		if err != nil {
+			sdl.Log("Failed to accept connection from client")
+			return -1
+		}
+
+		bytes_read, err_recv := net.recv_tcp(client, buffer[:])
+
+		// Update scene based on client data
+		_ = sdl.SetAtomicInt(&state.scene, i32(transmute(i32be)buffer))
+
+		net.close(client)
+	}
+
+	net.close(socket)
+	return 0
 }
 
 app_iterate :: proc "c" (appstate: rawptr) -> sdl.AppResult {
 	context = runtime.default_context()
 	state := cast(^App_State)appstate
 
-	switch &scene in state.current_scene {
+	// Change scene if needed
+	current_scene := Scene(sdl.GetAtomicInt(&state.scene))
+
+	switch current_scene {
+	case .Idle:
+		if _, ok := state.scene_state.(scenes.Idle_State); !ok {
+			sdl.Log("Transitioning scene: idle")
+			scene_quit(state.scene_state)
+			state.scene_state = scenes.idle_init(state.renderer)
+		}
+	case .Clock:
+		if _, ok := state.scene_state.(scenes.Clock_State); !ok {
+			sdl.Log("Transitioning scene: clock")
+			clock_state, ok := scenes.clock_init(WINDOW_SIZE, state.renderer).?
+			if !ok do return .FAILURE
+
+			scene_quit(state.scene_state)
+			state.scene_state = clock_state
+		}
+	case .Visualizer:
+		if _, ok := state.scene_state.(scenes.Visualizer_State); !ok {
+			sdl.Log("Transitioning scene: visualizer")
+			scene_quit(state.scene_state)
+			state.scene_state = scenes.visualizer_init(WINDOW_SIZE)
+		}
+	}
+
+	// Run scene iteration
+	switch &scene_state in state.scene_state {
 	case scenes.Idle_State:
 		return .CONTINUE
 	case scenes.Clock_State:
-		return scenes.clock_iterate(&scene, state.renderer)
+		return scenes.clock_iterate(&scene_state, state.renderer)
 	case scenes.Visualizer_State:
-		return scenes.visualizer_iterate(&scene, state.renderer)
+		return scenes.visualizer_iterate(&scene_state, state.renderer)
 	}
 
 	return .CONTINUE
@@ -98,24 +159,6 @@ app_event :: proc "c" (appstate: rawptr, event: ^sdl.Event) -> sdl.AppResult {
 	state := cast(^App_State)appstate
 
 	#partial switch event.type {
-	case .KEY_UP:
-		switch event.key.key {
-		case sdl.K_0:
-			sdl.Log("Transitioning scene: idle")
-			scene_quit(state.current_scene)
-			state.current_scene = scenes.idle_init(state.renderer)
-		case sdl.K_1:
-			sdl.Log("Transitioning scene: clock")
-			scene, ok := scenes.clock_init(WINDOW_SIZE, state.renderer).?
-			if !ok do return .FAILURE
-
-			scene_quit(state.current_scene)
-			state.current_scene = scene
-		case sdl.K_2:
-			sdl.Log("Transitioning scene: visualizer")
-			scene_quit(state.current_scene)
-			state.current_scene = scenes.visualizer_init(WINDOW_SIZE)
-		}
 	case .QUIT, .WINDOW_CLOSE_REQUESTED:
 		return .SUCCESS
 	}
@@ -136,7 +179,7 @@ app_quit :: proc "c" (appstate: rawptr, result: sdl.AppResult) {
 	sdl.free(appstate)
 }
 
-scene_quit :: proc(scene: Scene) {
+scene_quit :: proc(scene: Scene_State) {
 	switch &scene in scene {
 	case scenes.Idle_State:
 		return

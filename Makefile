@@ -19,10 +19,10 @@ compile: clean
 	mkdir -p $(OUT)
 	odin build . -target=linux_arm64 -build-mode=object -out:$(OUT)
 
+# Deploy to remote device and finish linking with system libraries
 deploy: compile
 	rsync -avz --delete $(OUT)/ $(REMOTE)/$(OUT)/
-	rsync -avz build.sh $(REMOTE)
-	ssh $(HOST) "./build.sh"
+	ssh $(HOST) "ld build/*.o -o portal -lSDL3 -lpthread -ldl -lm -lc -dynamic-linker /lib/ld-linux-aarch64.so.1 -e main::main"
 
 clean:
 	rm -rf $(OUT)

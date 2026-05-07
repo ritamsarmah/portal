@@ -14,6 +14,7 @@ Scene :: enum c.int {
 	Idle,
 	Clock,
 	Visualizer,
+	Quit,
 }
 
 Scene_State :: union {
@@ -44,7 +45,7 @@ app_init :: proc "c" (appstate: ^rawptr, argc: c.int, argv: [^]cstring) -> sdl.A
 	}
 
 	appstate^ = sdl.malloc(size_of(App_State))
-	if appstate == nil {
+	if appstate^ == nil {
 		sdl.Log("Failed to initialize app state\n")
 		return .FAILURE
 	}
@@ -88,26 +89,28 @@ start_server :: proc "c" (data: rawptr) -> c.int {
 	}
 
 	sdl.Log("Started TCP server")
+	defer net.close(socket)
 
 	buffer: [4]u8
 
 	for {
 		client, _, err_accept := net.accept_tcp(socket)
-		if err != nil {
+		defer net.close(client)
+
+		if err_accept != nil {
 			sdl.Log("Failed to accept connection from client")
 			return -1
 		}
 
 		bytes_read, err_recv := net.recv_tcp(client, buffer[:])
+		if err_recv != nil {
+			sdl.Log("Failed to receive data from client")
+			return -1
+		}
 
 		// Update scene based on client data
 		_ = sdl.SetAtomicInt(&state.scene, i32(transmute(i32be)buffer))
-
-		net.close(client)
 	}
-
-	net.close(socket)
-	return 0
 }
 
 app_iterate :: proc "c" (appstate: rawptr) -> sdl.AppResult {
@@ -139,6 +142,8 @@ app_iterate :: proc "c" (appstate: rawptr) -> sdl.AppResult {
 			scene_quit(state.scene_state)
 			state.scene_state = scenes.visualizer_init(WINDOW_SIZE)
 		}
+	case .Quit:
+		return .SUCCESS
 	}
 
 	// Run scene iteration
@@ -172,6 +177,7 @@ app_quit :: proc "c" (appstate: rawptr, result: sdl.AppResult) {
 
 	sdl.Log("Quitting %s with result %d", APP_NAME, result)
 
+	sdl.DetachThread(state.server_thread)
 	sdl.DestroyRenderer(state.renderer)
 	sdl.DestroyWindow(state.window)
 	sdl.Quit()

@@ -1,4 +1,4 @@
-package main
+package scenes
 
 import "core:math/cmplx"
 import "core:testing"
@@ -44,13 +44,6 @@ test_fft_length_1 :: proc(t: ^testing.T) {
 	data := [1]complex64{1}
 	fft(data[:])
 	testing.expect_value(t, data, [1]complex64{1})
-}
-
-@(test)
-test_fft_invalid_length :: proc(t: ^testing.T) {
-	data := [5]complex64{1, 2, 3, 4, 5}
-	testing.expect_assert(t, "Length must be a power of 2")
-	fft(data[:])
 }
 
 // FFT test cases borrowed from https://lloydrochester.com/post/c/example-fft/

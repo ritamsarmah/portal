@@ -14,7 +14,6 @@ Scene :: enum c.int {
 	Idle,
 	Clock,
 	Visualizer,
-	Quit,
 }
 
 Scene_State :: union {
@@ -108,6 +107,13 @@ start_server :: proc "c" (data: rawptr) -> c.int {
 			return -1
 		}
 
+		// Validate scene
+		scene := i32(transmute(i32be)buffer)
+		if scene < 0 || scene >= len(Scene) {
+			sdl.Log("Invalid scene: %d", scene)
+			continue
+		}
+
 		// Update scene based on client data
 		_ = sdl.SetAtomicInt(&state.scene, i32(transmute(i32be)buffer))
 	}
@@ -142,8 +148,6 @@ app_iterate :: proc "c" (appstate: rawptr) -> sdl.AppResult {
 			scene_quit(state.scene_state)
 			state.scene_state = scenes.visualizer_init(WINDOW_SIZE)
 		}
-	case .Quit:
-		return .SUCCESS
 	}
 
 	// Run scene iteration

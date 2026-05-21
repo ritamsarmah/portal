@@ -1,6 +1,5 @@
 package scenes
 
-import "base:runtime"
 import "core:math"
 import "core:os"
 import "core:strings"
@@ -29,38 +28,31 @@ Clock_State :: struct {
 	minute_hand_length: f32,
 	second_hand_length: f32,
 	center:             sdl.Point,
-	tz:                 ^datetime.TZ_Region,
 	background:         ^sdl.Texture,
+	tz:                 ^datetime.TZ_Region,
 }
 
-clock_init :: proc(window_size: sdl.Point, renderer: ^sdl.Renderer) -> Maybe(Clock_State) {
-	/* Load timezone region */
-
-	tz_link, tz_err := os.read_link("/etc/localtime", context.allocator)
-	if tz_err != nil {
-		sdl.Log("Failed to read timezone")
-		return nil
-	}
-	defer delete(tz_link)
-
-	tz_region := string(tz_link)
-	tz_region = strings.trim_left(tz_region, ".")
-	tz_region = strings.trim_prefix(tz_region, "/usr/share/zoneinfo/")
-
-	tz, tz_region_ok := timezone.region_load(tz_region)
-	if !tz_region_ok {
-		sdl.Log("Failed to load timezone region")
-		return nil
-	}
+clock_init :: proc(window_size: sdl.Point, renderer: ^sdl.Renderer) -> ^Clock_State {
+	state := new(Clock_State)
 
 	/* Create background texture */
 
-	window_center := window_size / 2
-	mark_radius := f32(window_size.x) * 0.4
+	state.mark_radius = f32(window_size.x) * 0.4
+	state.hour_hand_length = f32(window_size.x) * 0.25
+	state.minute_hand_length = f32(window_size.x) * 0.35
+	state.second_hand_length = f32(window_size.x) * 0.45
+	state.center = window_size / 2
 
-	background := sdl.CreateTexture(renderer, .RGBA8888, .TARGET, window_size.x, window_size.y)
-	sdl.SetTextureBlendMode(background, sdl.BLENDMODE_BLEND)
-	sdl.SetRenderTarget(renderer, background)
+	state.background = sdl.CreateTexture(
+		renderer,
+		.RGBA8888,
+		.TARGET,
+		window_size.x,
+		window_size.y,
+	)
+
+	sdl.SetTextureBlendMode(state.background, sdl.BLENDMODE_BLEND)
+	sdl.SetRenderTarget(renderer, state.background)
 	sdl.SetRenderDrawColorFloat(renderer, BG_COLOR.r, BG_COLOR.g, BG_COLOR.b, BG_COLOR.a)
 
 	sdl.RenderClear(renderer)
@@ -72,22 +64,36 @@ clock_init :: proc(window_size: sdl.Point, renderer: ^sdl.Renderer) -> Maybe(Clo
 		width: f32 = is_primary ? PRIMARY_MARK_WIDTH : SECONDARY_MARK_WIDTH
 		height: f32 = is_primary ? PRIMARY_MARK_HEIGHT : SECONDARY_MARK_HEIGHT
 		angle := f32(i) * math.TAU / MARK_COUNT
-		offset := is_primary ? mark_radius : mark_radius + height
+		offset := is_primary ? state.mark_radius : state.mark_radius + height
 
-		render_rect(renderer, width, height, angle, offset, FG_COLOR, window_center)
+		render_rect(renderer, width, height, angle, offset, FG_COLOR, state.center)
 	}
 
 	// Return to main render target
 	sdl.SetRenderTarget(renderer, nil)
 
-	return Clock_State {
-		hour_hand_length = f32(window_size.x) * 0.25,
-		minute_hand_length = f32(window_size.x) * 0.35,
-		second_hand_length = f32(window_size.x) * 0.45,
-		center = window_center,
-		tz = tz,
-		background = background,
+	/* Load timezone region */
+
+	tz_link, tz_err := os.read_link("/etc/localtime", context.allocator)
+	if tz_err != nil {
+		sdl.Log("failed to read timezone")
+		return nil
 	}
+	defer delete(tz_link)
+
+	tz_region := string(tz_link)
+	tz_region = strings.trim_left(tz_region, ".")
+	tz_region = strings.trim_prefix(tz_region, "/usr/share/zoneinfo/")
+
+	tz, tz_region_ok := timezone.region_load(tz_region)
+	if !tz_region_ok {
+		sdl.Log("failed to load timezone region")
+		return nil
+	}
+
+	state.tz = tz
+
+	return state
 }
 
 clock_iterate :: proc(state: ^Clock_State, renderer: ^sdl.Renderer) -> sdl.AppResult {
@@ -139,8 +145,9 @@ clock_iterate :: proc(state: ^Clock_State, renderer: ^sdl.Renderer) -> sdl.AppRe
 	return .CONTINUE
 }
 
-clock_quit :: proc(state: Clock_State) {
-	sdl.Log("Quitting clock scene")
-	free(state.tz)
+clock_quit :: proc(state: ^Clock_State) {
+	sdl.Log("quitting clock scene")
 	sdl.DestroyTexture(state.background)
+	free(state.tz)
+	free(state)
 }

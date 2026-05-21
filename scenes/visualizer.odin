@@ -47,10 +47,10 @@ Visualizer_State :: struct {
 	},
 }
 
-visualizer_init :: proc(window_size: sdl.Point) -> Visualizer_State {
+visualizer_init :: proc(window_size: sdl.Point) -> ^Visualizer_State {
 	assert(NUM_BANDS % BAND_WINDOW == 0)
 
-	state := Visualizer_State{}
+	state := new(Visualizer_State)
 	state.video.center = window_size / 2
 
 	state.audio.stream = sdl.OpenAudioDeviceStream(
@@ -152,9 +152,10 @@ visualizer_iterate :: proc(state: ^Visualizer_State, renderer: ^sdl.Renderer) ->
 	return .CONTINUE
 }
 
-visualizer_quit :: proc(state: Visualizer_State) {
-	sdl.Log("Quitting visualizer scene")
+visualizer_quit :: proc(state: ^Visualizer_State) {
+	sdl.Log("quitting visualizer scene")
 	sdl.DestroyAudioStream(state.audio.stream)
+	free(state)
 }
 
 /* Fast Fourier Transform */

@@ -6,74 +6,61 @@ import "core:encoding/json"
 import "core:fmt"
 import "core:math"
 import "core:os"
-import "core:slice"
 import "core:strings"
+import "core:sync"
+import "core:thread"
 import "vendor:curl"
-import sdl "vendor:sdl3"
-import image "vendor:sdl3/image"
+import rl "vendor:raylib"
 
-// MusicBrainz API (https://musicbrainz.org/doc/MusicBrainz_API)
-MB_API_URL: cstring : "https://musicbrainz.org"
-MB_USER_AGENT: cstring : "portal/1.0 ( hello@ritam.me )"
-MB_COVER_API_URL :: "https://coverartarchive.org"
-
-ARTWORK_CACHE_DIR :: "artwork"
-ARTWORK_CACHE_LIMIT :: 20
-
-POLL_RATE_MS :: 3000
-ROTATION_DEG_PER_S :: 32
-
-Artwork_Status :: enum c.int {
-	Idle,
-	Loading,
-	Ready,
-}
+POLL_RATE_S :: 4
+ROTATION_RATE :: 32
 
 Media_State :: struct {
-	rect:         sdl.FRect,
-	angle:        f64,
-	mbid:         string,
-	last_updated: string,
-	poll_timer:   sdl.TimerID,
-	artwork:      struct {
-		status:   sdl.AtomicInt,
-		filename: cstring,
-		texture:  ^sdl.Texture,
+	poll_timer:  f32,
+	poll_thread: ^thread.Thread,
+	artwork:     struct {
+		ready:    bool,
+		image:    rl.Image,
+		mu:       sync.Mutex,
+		texture:  rl.Texture,
+		origin:   rl.Vector2,
+		dest:     rl.Rectangle,
+		rotation: f32,
 	},
-	ha:           struct {
-		url:           cstring,
-		authorization: cstring,
-		headers:       ^curl.slist,
-	},
-}
-
-HA_Media_Attributes :: struct {
-	media_title:      string,
-	media_artist:     string,
-	media_album_name: string,
-}
-
-HA_Media_Response :: struct {
-	attributes:   HA_Media_Attributes,
-	last_updated: string,
-}
-
-MB_Release_Response :: struct {
-	releases: []struct {
-		id: string,
+	ha:          struct {
+		url:              string,
+		entity:           string,
+		authorization:    cstring,
+		headers:          ^curl.slist,
+		media_content_id: string,
 	},
 }
-media_init :: proc(window_size: sdl.Point) -> ^Media_State {
-	defer free_all(context.temp_allocator)
 
-	os.make_directory(ARTWORK_CACHE_DIR)
+Media_Response :: struct {
+	attributes:   struct {
+		media_title:      string,
+		media_artist:     string,
+		media_album_name: string,
+		media_content_id: string,
+		entity_picture:   string,
+	},
+	last_changed: string,
+}
+
+media_init :: proc() -> ^Media_State {
+	fmt.println("initializing media scene")
+
+	window_width := f32(rl.GetScreenWidth())
+	window_height := f32(rl.GetScreenHeight())
+	diameter := math.min(window_width, window_height)
 
 	state := new(Media_State)
+	state.poll_timer = POLL_RATE_S // Initialize timer so it immediately fires
+	state.artwork.origin = {window_width, window_height} / 2
+	state.artwork.dest = {state.artwork.origin.x, state.artwork.origin.y, diameter, diameter}
 
-	diameter := f32(math.min(window_size.x, window_size.y))
-	state.rect = sdl.FRect{0, 0, diameter, diameter}
-
-	state.ha.url = strings.clone_to_cstring(os.get_env("HA_MEDIA_URL", context.temp_allocator))
+	state.ha.url = os.get_env("HA_URL", context.allocator)
+	state.ha.entity = os.get_env("HA_MEDIA_ENTITY", context.allocator)
 	state.ha.authorization = fmt.caprintf(
 		"Authorization: Bearer %v",
 		os.get_env("HA_TOKEN", context.temp_allocator),
@@ -81,204 +68,152 @@ media_init :: proc(window_size: sdl.Point) -> ^Media_State {
 	state.ha.headers = curl.slist_append(state.ha.headers, state.ha.authorization)
 	state.ha.headers = curl.slist_append(state.ha.headers, "Content-Type: application/json")
 
-	sdl.Log("Home Assistant URL: %s", state.ha.url)
-
-	state.poll_timer = sdl.AddTimer(0, update_artwork, state) // NOTE: Runs on separate thread
-
-	_ = sdl.SetAtomicInt(&state.artwork.status, i32(Artwork_Status.Idle))
+	fmt.printfln("Home Assistant URL: %s", state.ha.url)
 
 	return state
 }
 
-media_iterate :: proc(state: ^Media_State, renderer: ^sdl.Renderer, dt: f64) -> sdl.AppResult {
-	sdl.SetRenderDrawColor(renderer, 0, 0, 0, sdl.ALPHA_OPAQUE)
-	sdl.RenderClear(renderer)
-
-	artwork_status := Artwork_Status(sdl.GetAtomicInt(&state.artwork.status))
-
-	switch artwork_status {
-	case .Idle, .Loading:
-		if state.artwork.texture != nil {
-			sdl.RenderTextureRotated(
-				renderer,
-				state.artwork.texture,
-				nil,
-				&state.rect,
-				state.angle,
-				nil,
-				.NONE,
-			)
-
-			state.angle += ROTATION_DEG_PER_S * dt
-			state.angle = math.mod(state.angle + 360, 360)
-		}
-	case .Ready:
-		sdl.DestroyTexture(state.artwork.texture)
-		state.artwork.texture = image.LoadTexture(renderer, state.artwork.filename)
-		_ = sdl.SetAtomicInt(&state.artwork.status, i32(Artwork_Status.Idle))
-	}
-
-	sdl.RenderPresent(renderer)
-
-	return .CONTINUE
-}
-
 media_quit :: proc(state: ^Media_State) {
-	sdl.Log("quitting media scene")
-
-	_ = sdl.RemoveTimer(state.poll_timer)
+	fmt.println("quitting media scene")
 
 	curl.slist_free_all(state.ha.headers)
-	delete(state.ha.authorization)
-	delete(state.ha.url)
 
-	delete(state.artwork.filename)
-	sdl.DestroyTexture(state.artwork.texture)
+	delete(state.ha.authorization)
+	delete(state.ha.entity)
+	delete(state.ha.url)
+	delete(state.ha.media_content_id)
+
+	rl.UnloadImage(state.artwork.image)
+	rl.UnloadTexture(state.artwork.texture)
 
 	free(state)
 }
 
-@(private)
-update_artwork :: proc "c" (
-	userdata: rawptr,
-	timer_id: sdl.TimerID,
-	interval: sdl.Uint32,
-) -> sdl.Uint32 {
-	context = runtime.default_context()
-	defer free_all(context.temp_allocator)
+media_update :: proc(state: ^Media_State) {
+	// Run poll timer only when we aren't currently checking for updated artwork
+	if state.poll_thread == nil do state.poll_timer += rl.GetFrameTime()
 
-	state := cast(^Media_State)userdata
-	data := make([dynamic]byte, context.temp_allocator)
-	attributes: HA_Media_Attributes
+	if state.poll_timer >= POLL_RATE_S {
+		state.poll_timer = 0
+		state.poll_thread = thread.create_and_start_with_data(
+			state,
+			update_artwork,
+			init_context = context,
+			self_cleanup = true,
+		)
+	}
+}
 
-	artwork_status := Artwork_Status(sdl.GetAtomicInt(&state.artwork.status))
-	if artwork_status == .Loading do return POLL_RATE_MS
+media_draw :: proc(state: ^Media_State) {
+	rl.ClearBackground(rl.BLANK)
 
-	{ 	// Fetch Home Assistant media player state
-		handle := curl.easy_init()
-		defer curl.easy_cleanup(handle)
+	artwork := &state.artwork
 
-		curl.easy_setopt(handle, .URL, state.ha.url)
-		curl.easy_setopt(handle, .HTTPHEADER, state.ha.headers)
-		curl.easy_setopt(handle, .WRITEFUNCTION, write_callback)
-		curl.easy_setopt(handle, .WRITEDATA, &data)
-
-		if result := curl.easy_perform(handle); result != .E_OK {
-			sdl.Log("error fetching Home Assistant media state: %s", curl.easy_strerror(result))
-			return 0
+	// Texture must be loaded on the main thread since it runs on GPU
+	if sync.mutex_guard(&artwork.mu) {
+		if artwork.ready {
+			rl.UnloadTexture(artwork.texture)
+			artwork.texture = rl.LoadTextureFromImage(artwork.image)
+			artwork.ready = false
 		}
-
-		// Check if there is media state change since last update
-		response: HA_Media_Response
-		json.unmarshal(data[:], &response, allocator = context.temp_allocator)
-
-		if response.last_updated == state.last_updated || response.attributes.media_title == "" {
-			return POLL_RATE_MS
-		}
-
-		attributes = response.attributes
-		state.last_updated = response.last_updated
-
-		sdl.Log("media player state changed")
-		_ = sdl.SetAtomicInt(&state.artwork.status, i32(Artwork_Status.Loading))
 	}
 
-	{ 	// Fetch release ID from MusicBrainz API
-		clear(&data)
-
-		url := curl.url()
-		defer curl.url_cleanup(url)
-
-		query := fmt.ctprintf(
-			"query=release:%v AND artist:%v",
-			attributes.media_album_name,
-			attributes.media_artist,
+	if rl.IsTextureValid(artwork.texture) {
+		rl.DrawTexturePro(
+			artwork.texture,
+			{0, 0, f32(artwork.texture.width), f32(artwork.texture.height)},
+			artwork.dest,
+			artwork.origin,
+			artwork.rotation,
+			rl.WHITE,
 		)
 
-		curl.url_set(url, .URL, MB_API_URL, {})
-		curl.url_set(url, .PATH, "/ws/2/release", {})
-		curl.url_set(url, .QUERY, query, {.APPENDQUERY, .URLENCODE})
-		curl.url_set(url, .QUERY, "limit=1", {.APPENDQUERY})
-		curl.url_set(url, .QUERY, "fmt=json", {.APPENDQUERY})
+		artwork.rotation += ROTATION_RATE * rl.GetFrameTime()
+		artwork.rotation = math.mod(artwork.rotation + 360, 360)
+	}
+}
 
-		handle := curl.easy_init()
-		defer curl.easy_cleanup(handle)
+@(private)
+update_artwork :: proc(data: rawptr) {
+	defer free_all(context.temp_allocator)
 
-		curl.easy_setopt(handle, .CURLU, url)
-		curl.easy_setopt(handle, .USERAGENT, MB_USER_AGENT)
-		curl.easy_setopt(handle, .WRITEFUNCTION, write_callback)
-		curl.easy_setopt(handle, .WRITEDATA, &data)
+	state := (^Media_State)(data)
+	buffer := make([dynamic]byte, context.temp_allocator)
+	defer state.poll_thread = nil
 
-		sdl.Log("fetching MusicBrainz release ID")
+	handle := curl.easy_init()
+	defer curl.easy_cleanup(handle)
 
-		if result := curl.easy_perform(handle); result != .E_OK {
-			sdl.Log("error fetching MusicBrainz release ID: %s", curl.easy_strerror(result))
-			return 0
-		}
+	// Refresh Spotify entity (since Home Assistant default interval is 30 seconds)
 
-		response: MB_Release_Response
-		json.unmarshal(data[:], &response, allocator = context.temp_allocator)
+	url := fmt.ctprintf("%v/api/services/script/refresh_spotify", state.ha.url)
 
-		// Check if there is available release info
-		if len(response.releases) == 0 do return POLL_RATE_MS
+	curl.easy_setopt(handle, .URL, url)
+	curl.easy_setopt(handle, .HTTPHEADER, state.ha.headers)
+	curl.easy_setopt(handle, .POST, 1)
+	curl.easy_setopt(handle, .POSTFIELDS, "{}")
+	curl.easy_setopt(handle, .WRITEFUNCTION, write_callback)
+	curl.easy_setopt(handle, .WRITEDATA, &buffer)
 
-		// Check if the album has changed
-		// This handles new songs from same album, which have same artwork
-		release_id := response.releases[0].id
-		if release_id == state.mbid do return POLL_RATE_MS
-
-		state.mbid = release_id
+	if result := curl.easy_perform(handle); result != .E_OK {
+		fmt.eprintln("error refreshing Spotify:", curl.easy_strerror(result))
+		return
 	}
 
-	{ 	// Update album artwork from cache or URL
-		filename := fmt.tprintf("%v/%v.jpg", ARTWORK_CACHE_DIR, state.mbid)
+	// Fetch media player state
 
-		if !os.exists(filename) {
-			clear(&data)
+	clear(&buffer)
 
-			url := curl.url()
-			defer curl.url_cleanup(url)
+	url = fmt.ctprintf("%v/api/states/%v", state.ha.url, state.ha.entity)
 
-			path := fmt.ctprintf("release/%v/front", state.mbid)
+	curl.easy_reset(handle)
+	curl.easy_setopt(handle, .URL, url)
+	curl.easy_setopt(handle, .HTTPHEADER, state.ha.headers)
+	curl.easy_setopt(handle, .WRITEFUNCTION, write_callback)
+	curl.easy_setopt(handle, .WRITEDATA, &buffer)
 
-			curl.url_set(url, .URL, MB_COVER_API_URL, {})
-			curl.url_set(url, .PATH, path, {})
-
-			handle := curl.easy_init()
-			defer curl.easy_cleanup(handle)
-
-			curl.easy_setopt(handle, .CURLU, url)
-			curl.easy_setopt(handle, .FOLLOWLOCATION, 1)
-			curl.easy_setopt(handle, .USERAGENT, MB_USER_AGENT)
-			curl.easy_setopt(handle, .WRITEFUNCTION, write_callback)
-			curl.easy_setopt(handle, .WRITEDATA, &data)
-
-			sdl.Log("fetching artwork for release: %s", state.mbid)
-
-			if result := curl.easy_perform(handle); result != .E_OK {
-				sdl.Log("error fetching artwork: %s", curl.easy_strerror(result))
-				return 0
-			}
-
-			err := os.write_entire_file(filename, data[:])
-			if err != nil {
-				sdl.Log("failed to cache artwork")
-				return 0
-			}
-
-			evict_artwork_cache()
-		} else {
-			sdl.Log("using cached artwork for release: %s", state.mbid)
-		}
-
-		delete(state.artwork.filename)
-		state.artwork.filename = strings.clone_to_cstring(filename)
-		_ = sdl.SetAtomicInt(&state.artwork.status, i32(Artwork_Status.Ready))
-
-		sdl.Log("updated artwork for release: %s", state.mbid)
+	if result := curl.easy_perform(handle); result != .E_OK {
+		fmt.eprintln("error fetching Home Assistant media state:", curl.easy_strerror(result))
+		return
 	}
 
-	return POLL_RATE_MS
+	response: Media_Response
+	json.unmarshal(buffer[:], &response, allocator = context.temp_allocator)
+
+	// Check if media changed since last update
+	if response.attributes.media_content_id == state.ha.media_content_id ||
+	   response.attributes.media_title == "" {
+		return
+	}
+
+	delete(state.ha.media_content_id)
+	state.ha.media_content_id = strings.clone(response.attributes.media_content_id)
+
+	// Download artwork
+
+	clear(&buffer)
+
+	url = fmt.ctprintf("%v%v", state.ha.url, response.attributes.entity_picture)
+
+	curl.easy_reset(handle)
+	curl.easy_setopt(handle, .URL, url)
+	curl.easy_setopt(handle, .HTTPHEADER, state.ha.headers)
+	curl.easy_setopt(handle, .FOLLOWLOCATION, 1)
+	curl.easy_setopt(handle, .WRITEFUNCTION, write_callback)
+	curl.easy_setopt(handle, .WRITEDATA, &buffer)
+
+	if result := curl.easy_perform(handle); result != .E_OK {
+		fmt.eprintln("error downloading artwork:", curl.easy_strerror(result))
+		return
+	}
+
+	fmt.println("media player state changed:", response.attributes)
+
+	if sync.mutex_guard(&state.artwork.mu) {
+		rl.UnloadImage(state.artwork.image)
+		state.artwork.image = rl.LoadImageFromMemory(".jpg", raw_data(buffer[:]), i32(len(buffer)))
+		state.artwork.ready = true
+	}
 }
 
 write_callback :: proc "c" (
@@ -292,32 +227,4 @@ write_callback :: proc "c" (
 	total := size * nitems
 	append(response, ..buffer[:total])
 	return total
-}
-
-@(private)
-evict_artwork_cache :: proc() {
-	entries, err := os.read_directory_by_path(ARTWORK_CACHE_DIR, 0, context.allocator)
-	defer delete(entries)
-
-	files := make([dynamic]string)
-	defer delete(files)
-
-	for e in entries {
-		path := fmt.tprintf("%v/%v", ARTWORK_CACHE_DIR, e.name)
-		append(&files, path)
-	}
-
-	if len(files) <= ARTWORK_CACHE_LIMIT do return
-
-	slice.sort_by(files[:], proc(a, b: string) -> bool {
-		time_a, _ := os.modification_time_by_path(a)
-		time_b, _ := os.modification_time_by_path(b)
-		return time_a._nsec < time_b._nsec
-	})
-
-	excess := len(files) - ARTWORK_CACHE_LIMIT
-
-	sdl.Log("evicting %d images from cache", excess)
-
-	for i in 0 ..< excess do _ = os.remove(files[i])
 }

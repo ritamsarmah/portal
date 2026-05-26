@@ -1,19 +1,21 @@
 package scenes
 
-import sdl "vendor:sdl3"
+import "core:fmt"
+import rl "vendor:raylib"
 
 Idle_State :: struct {}
 
-idle_init :: proc(renderer: ^sdl.Renderer) -> ^Idle_State {
-	// Draw black background
-	sdl.SetRenderDrawColor(renderer, 0, 0, 0, sdl.ALPHA_OPAQUE)
-	sdl.RenderClear(renderer)
-	sdl.RenderPresent(renderer)
+idle_init :: proc() -> ^Idle_State {
+	fmt.println("initializing idle scene")
+
+	rl.BeginDrawing()
+	rl.ClearBackground(rl.BLACK)
+	rl.EndDrawing()
 
 	return new(Idle_State)
 }
 
 idle_quit :: proc(state: ^Idle_State) {
-	sdl.Log("quitting idle scene")
+	fmt.println("quitting idle scene")
 	free(state)
 }

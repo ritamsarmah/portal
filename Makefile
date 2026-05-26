@@ -11,8 +11,7 @@ REMOTE := $(HOST):/home/pi
 all: debug
 
 debug:
-	mkdir -p $(OUT)
-	odin build . -debug -o:none -out:$(OUT)/$(APP)
+	odin run . -debug -o:none
 
 run:
 	odin run .
@@ -28,4 +27,4 @@ deploy: compile
 	ssh $(HOST) "ld build/*.o -o portal -lSDL3 -lSDL3_image -lpthread -ldl -lm -lc -lcurl -dynamic-linker /lib/ld-linux-aarch64.so.1 -e main::main"
 
 clean:
-	rm -rf $(OUT)
+	rm -rf $(OUT) $(PROJECT)

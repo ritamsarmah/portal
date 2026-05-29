@@ -50,7 +50,7 @@ main :: proc() {
 
 	// raylib
 
-	rl.SetConfigFlags({.VSYNC_HINT, .WINDOW_HIGHDPI})
+	rl.SetConfigFlags({.VSYNC_HINT, .MSAA_4X_HINT})
 	rl.InitWindow(WINDOW_WIDTH, WINDOW_HEIGHT, APP_NAME)
 	defer rl.CloseWindow()
 
@@ -64,7 +64,7 @@ main :: proc() {
 	// App
 
 	state := App_State{}
-	state.scene = scenes.visualizer_init() // TODO: change to idle
+	state.scene = scenes.media_init()
 	defer quit_scene(state.scene)
 
 	for !rl.WindowShouldClose() {

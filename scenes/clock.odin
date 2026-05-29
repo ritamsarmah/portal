@@ -21,7 +21,7 @@ ACCENT_COLOR :: rl.RED
 
 HOUR_HAND_LEN :: 0.25
 MINUTE_HAND_LEN :: 0.35
-SECOND_HAND_LEN :: 0.4
+SECOND_HAND_LEN :: 0.45
 
 HOUR_HAND_THICK :: 10.0
 MINUTE_HAND_THICK :: 10.0
@@ -92,7 +92,7 @@ clock_init :: proc() -> ^Clock_State {
 		rl.ClearBackground(BG_COLOR)
 
 		step := 360.0 / f32(MARK_COUNT)
-		mark_radius := window_width * 0.4
+		mark_radius := window_width * 0.45
 
 		for i in 0 ..< MARK_COUNT {
 			is_primary := i % 5 == 0

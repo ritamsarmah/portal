@@ -10,14 +10,14 @@ SAMPLES_LEN :: 1024 // must be power of 2 for FFT
 BINS_LEN :: (SAMPLES_LEN / 2) + 1 // Based on Nyquist frequency
 FRAMES_LEN :: 2 // number of seconds
 
-BASS_MAGNITUDES :: 6
-
-NUM_BARS :: 80 // radial frequency bars
-WAVEFORM_POINTS :: 256 // points in the waveform ring
-MIN_RADIUS :: 90.0 // inner ring radius
-MAX_RADIUS :: 260.0 // max bar tip radius
-WAVEFORM_RADIUS :: 70.0 // waveform ring radius (inside the bars)
+BARS_LEN :: 80
+MIN_RADIUS :: 90.0
+MAX_RADIUS :: 260.0
 GLOW_LAYERS :: 4 // number of glow passes per bar
+BASS_MAGNITUDES :: 6
+HUE_RATE :: 15.0
+MAGNITUDE_DECAY :: 0.9
+BEAT_PULSE_DECAY :: 0.85
 
 Visualizer_State :: struct {
 	audio: struct {
@@ -28,10 +28,10 @@ Visualizer_State :: struct {
 	},
 	video: struct {
 		origin:     rl.Vector2,
-		magnitudes: [NUM_BARS]f32, // smoothed bar heights [0..1]
+		magnitudes: [BARS_LEN]f32, // smoothed bar heights [0..1]
 		hue_offset: f32, // color rotation over time
 		beat_pulse: f32, // flash intensity on beat
-		prev_bass:  f32, // for beat detection
+		last_bass:  f32,
 	},
 }
 
@@ -81,11 +81,19 @@ visualizer_update :: proc(state: ^Visualizer_State) {
 	dt := rl.GetFrameTime()
 	count := len(audio.samples)
 
-	// Decay bars toward silence when no audio
+	fmt.printfln("%v %v", video.hue_offset, video.beat_pulse)
+
+	// Decay toward silence when no audio
 	if count == 0 {
-		video.magnitudes *= 0.9
-		video.beat_pulse *= 0.85
-		video.hue_offset += dt * 15.0
+		video.magnitudes *= MAGNITUDE_DECAY
+
+		if video.beat_pulse > 0.1 {
+			video.beat_pulse *= BEAT_PULSE_DECAY
+		} else {
+			video.beat_pulse = 0
+		}
+
+		video.hue_offset += dt * HUE_RATE
 		return
 	}
 
@@ -110,10 +118,10 @@ visualizer_update :: proc(state: ^Visualizer_State) {
 	bin_low: f32 = 1
 	bin_high: f32 = BINS_LEN - 1
 
-	for bar, i in 0 ..< NUM_BARS {
+	for bar, i in 0 ..< BARS_LEN {
 		// Log-spaced bin range for this bar
-		t0 := f32(bar) / NUM_BARS
-		t1 := f32(bar + 1) / NUM_BARS
+		t0 := f32(bar) / BARS_LEN
+		t1 := f32(bar + 1) / BARS_LEN
 
 		lo := bin_low * math.pow(bin_high / bin_low, t0)
 		hi := bin_low * math.pow(bin_high / bin_low, t1)
@@ -131,8 +139,8 @@ visualizer_update :: proc(state: ^Visualizer_State) {
 		}
 
 		// Convert to dB and normalize
-		db := 20 * math.log10(math.max(peak, 1e-6))
-		normalized := math.clamp((db + 80) / 80, 0, 1)
+		db := 20.0 * math.log10(math.max(peak, 1e-6))
+		normalized: f32 = math.clamp((db + 80) / 80, 0, 1)
 
 		// Smooth toward raw values with a fast attack and slow decay
 		factor: f32 = normalized > video.magnitudes[i] ? 0.6 : 0.15
@@ -141,14 +149,14 @@ visualizer_update :: proc(state: ^Visualizer_State) {
 
 	// Detect beat by comparing current bass energy to previous
 	bass_energy := math.sum(video.magnitudes[:BASS_MAGNITUDES]) / BASS_MAGNITUDES
-	if bass_energy > video.prev_bass * 1.3 && bass_energy > 0.3 {
+	if bass_energy > video.last_bass * 1.3 && bass_energy > 0.3 {
 		video.beat_pulse = 1.0
 	}
-	video.prev_bass = math.lerp(video.prev_bass, bass_energy, f32(0.1))
-	video.beat_pulse *= 0.88
+	video.last_bass = math.lerp(video.last_bass, bass_energy, f32(0.1))
+	video.beat_pulse *= BEAT_PULSE_DECAY
 
 	// Rotate hue faster when there's more energy
-	magnitude_mean := math.sum(video.magnitudes[:]) / NUM_BARS
+	magnitude_mean := math.sum(video.magnitudes[:]) / BARS_LEN
 	video.hue_offset += dt * (20.0 + magnitude_mean * 60.0)
 }
 
@@ -166,15 +174,15 @@ visualizer_draw :: proc(state: ^Visualizer_State) {
 	}
 
 	// Radial frequency bars
-	for bar in 0 ..< NUM_BARS {
+	for bar in 0 ..< BARS_LEN {
 		mag := video.magnitudes[bar]
 		if mag < 0.001 do continue
 
-		angle_deg := f32(bar) / f32(NUM_BARS) * 360.0
+		angle_deg := f32(bar) / f32(BARS_LEN) * 360.0
 		angle_rad := angle_deg * math.PI / 180.0
 
 		// Hue: spread across spectrum + offset rotation
-		hue := math.mod(f32(bar) / f32(NUM_BARS) * 300.0 + video.hue_offset, 360.0)
+		hue := math.mod(f32(bar) / f32(BARS_LEN) * 300.0 + video.hue_offset, 360.0)
 		sat := 0.75 + mag * 0.25
 		lit := 0.45 + mag * 0.20
 
@@ -203,18 +211,18 @@ visualizer_draw :: proc(state: ^Visualizer_State) {
 		rl.DrawCircleV(p_outer, tip_r, tip_c)
 	}
 
-	// Outer glow
-	pulse_r := 28.0 + video.beat_pulse * 14.0
-	for g in 0 ..< 5 {
-		gr := pulse_r + f32(g) * 6.0
-		hue := math.mod(video.hue_offset, 360.0)
-		rl.DrawCircleV(origin, gr, rl.ColorFromHSV(hue, 0.9, 0.6))
-	}
+	// // Outer glow
+	// pulse_r := 28.0 + video.beat_pulse * 14.0
+	// for g in 0 ..< 5 {
+	// 	gr := pulse_r + f32(g) * 6.0
+	// 	hue := math.mod(video.hue_offset, 360.0)
+	// 	rl.DrawCircleV(origin, gr, rl.ColorFromHSV(hue, 0.9, 0.6))
+	// }
 
 	// Core
-	core_hue := math.mod(video.hue_offset, 360.0)
-	rl.DrawCircleV(origin, pulse_r, rl.ColorFromHSV(core_hue, 0.6, 0.3))
-	rl.DrawCircleV(origin, pulse_r * 0.55, rl.ColorFromHSV(core_hue, 0.4, 0.85))
+	// core_hue := math.mod(video.hue_offset, 360.0)
+	// rl.DrawCircleV(origin, pulse_r, rl.ColorFromHSV(core_hue, 0.6, 0.3))
+	// rl.DrawCircleV(origin, pulse_r * 0.55, rl.ColorFromHSV(core_hue, 0.4, 0.85))
 }
 
 capture_callback :: proc "c" (device: ^ma.device, output, input: rawptr, frame_count: u32) {

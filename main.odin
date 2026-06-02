@@ -6,6 +6,7 @@ import "core:mem"
 import "core:net"
 import "core:sync"
 import "core:thread"
+import "core:time"
 import "vendor:curl"
 import rl "vendor:raylib"
 
@@ -26,6 +27,7 @@ Scene :: union {
 App_State :: struct {
 	scene:      Scene,
 	scene_lock: sync.RW_Mutex,
+	shutdown:   bool,
 }
 
 main :: proc() {
@@ -64,12 +66,17 @@ main :: proc() {
 	// App
 
 	state := App_State{}
-	state.scene = scenes.media_init()
+	state.scene = scenes.idle_init()
 	defer quit_scene(state.scene)
+
+	// server_thread := thread.create_and_start_with_data(&state, start_server)
+	// defer thread.destroy(server_thread)
+
+	defer state.shutdown = true
 
 	for !rl.WindowShouldClose() {
 		if sync.rw_mutex_shared_guard(&state.scene_lock) {
-			update(state.scene)
+			update(&state)
 			draw(state.scene)
 		}
 
@@ -77,9 +84,15 @@ main :: proc() {
 	}
 }
 
-update :: proc(scene: Scene) {
-	switch &s in scene {
+update :: proc(state: ^App_State) {
+	if rl.IsKeyPressed(.ZERO) do set_scene(state, 0)
+	if rl.IsKeyPressed(.ONE) do set_scene(state, 1)
+	if rl.IsKeyPressed(.TWO) do set_scene(state, 2)
+	if rl.IsKeyPressed(.THREE) do set_scene(state, 3)
+
+	switch &s in state.scene {
 	case ^scenes.Idle_State:
+		return
 	case ^scenes.Clock_State:
 		scenes.clock_update(s)
 	case ^scenes.Media_State:
@@ -95,7 +108,7 @@ draw :: proc(scene: Scene) {
 
 	switch &s in scene {
 	case ^scenes.Idle_State:
-		break
+		scenes.idle_draw(s)
 	case ^scenes.Clock_State:
 		scenes.clock_draw(s)
 	case ^scenes.Media_State:
@@ -106,31 +119,29 @@ draw :: proc(scene: Scene) {
 }
 
 set_scene :: proc(state: ^App_State, value: i32) {
-	if sync.rw_mutex_guard(&state.scene_lock) {
-		switch value {
-		case 0:
-			if s, ok := state.scene.(^scenes.Idle_State); !ok {
-				quit_scene(state.scene)
-				state.scene = scenes.idle_init()
-			}
-		case 1:
-			if s, ok := state.scene.(^scenes.Clock_State); !ok {
-				quit_scene(state.scene)
-				state.scene = scenes.clock_init()
-			}
-		case 2:
-			if s, ok := state.scene.(^scenes.Media_State); !ok {
-				quit_scene(state.scene)
-				state.scene = scenes.media_init()
-			}
-		case 3:
-			if s, ok := state.scene.(^scenes.Visualizer_State); !ok {
-				quit_scene(state.scene)
-				state.scene = scenes.visualizer_init()
-			}
-		case:
-			fmt.eprintln("invalid scene value:", value)
+	switch value {
+	case 0:
+		if s, ok := state.scene.(^scenes.Idle_State); !ok {
+			quit_scene(state.scene)
+			state.scene = scenes.idle_init()
 		}
+	case 1:
+		if s, ok := state.scene.(^scenes.Clock_State); !ok {
+			quit_scene(state.scene)
+			state.scene = scenes.clock_init()
+		}
+	case 2:
+		if s, ok := state.scene.(^scenes.Media_State); !ok {
+			quit_scene(state.scene)
+			state.scene = scenes.media_init()
+		}
+	case 3:
+		if s, ok := state.scene.(^scenes.Visualizer_State); !ok {
+			quit_scene(state.scene)
+			state.scene = scenes.visualizer_init()
+		}
+	case:
+		fmt.eprintln("invalid scene value:", value)
 	}
 }
 
@@ -152,9 +163,6 @@ quit_scene :: proc(scene: Scene) {
 start_server :: proc(data: rawptr) {
 	state := (^App_State)(data)
 
-	// TODO: Add CloseWindow to failures?
-	// TODO: Add shutdown signal since net.accept_tcp blocks
-
 	socket, err := net.listen_tcp({address = net.IP4_Address{0, 0, 0, 0}, port = 9041})
 	if err != nil {
 		fmt.eprintln("failed to start TCP listener")
@@ -164,16 +172,15 @@ start_server :: proc(data: rawptr) {
 	fmt.println("started TCP server")
 	defer net.close(socket)
 
+	// Set timeout so accept TCP unblocks periodically for shutdown
+	net.set_option(socket, .Receive_Timeout, time.Second)
+
 	buffer: [4]u8
 
-	for {
+	for !state.shutdown {
 		client, _, err_accept := net.accept_tcp(socket)
+		if err_accept != nil do continue
 		defer net.close(client)
-
-		if err_accept != nil {
-			fmt.eprintln("failed to accept connection from client")
-			return
-		}
 
 		bytes_read, err_recv := net.recv_tcp(client, buffer[:])
 		if err_recv != nil {
@@ -181,8 +188,9 @@ start_server :: proc(data: rawptr) {
 			return
 		}
 
-		// Validate scene
 		value := i32(transmute(i32be)buffer)
-		set_scene(state, value)
+		if sync.rw_mutex_guard(&state.scene_lock) {
+			set_scene(state, value)
+		}
 	}
 }

@@ -135,6 +135,7 @@ media_draw :: proc(state: ^Media_State) {
 
 @(private)
 update_artwork :: proc(data: rawptr) {
+	defer runtime.default_temp_allocator_destroy(auto_cast context.temp_allocator.data)
 	defer free_all(context.temp_allocator)
 
 	state := (^Media_State)(data)

@@ -55,6 +55,7 @@ dependencies: miniaudio raylib
 # Deploy to remote device and finish linking
 deploy: compile
 	rsync -avz --delete $(OUT)/ $(REMOTE)/$(OUT)/
+	rsync -avz server.sh $(REMOTE)/server.sh
 	ssh $(HOST) "\
 		gcc build/*.o -o portal \
 		-L/home/pi/raylib/src \

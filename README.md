@@ -1,6 +1,6 @@
 # Portal
 
-A collection of various programs that run on a custom display.
+A collection of various programs that run on a custom circular display.
 
 ## Installation
 
@@ -18,16 +18,15 @@ HA_MEDIA_ENTITY=
 HA_TOKEN=
 ```
 
-6. To auto-start on boot, enable console auto-login via `sudo raspi-config` (System Options > Auto Login > Console Autologin) and add the following to `.profile`:
+To run with "remote control" functionality and auto-start on boot:
+
+1. Enable console auto-login via `sudo raspi-config` (System Options > Auto Login > Console Autologin)
+2. Copy `server.sh` to the Raspberry Pi and add the following to `.profile`:
 
 ```sh
 if [ "$(tty)" = "/dev/tty1" ]; then
-  set -a
-  . .env
-  set +a
-
-  exec ./portal
+  exec ./server.sh
 fi
 ```
 
-7. Reboot.
+3. Reboot. Use `client.sh` to remotely change the scene.

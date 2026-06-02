@@ -3,10 +3,8 @@ package main
 import "base:runtime"
 import "core:fmt"
 import "core:mem"
-import "core:net"
-import "core:sync"
-import "core:thread"
-import "core:time"
+import "core:os"
+import "core:sys/posix"
 import "vendor:curl"
 import rl "vendor:raylib"
 
@@ -22,12 +20,6 @@ Scene :: union {
 	^scenes.Clock_State,
 	^scenes.Media_State,
 	^scenes.Visualizer_State,
-}
-
-App_State :: struct {
-	scene:      Scene,
-	scene_lock: sync.RW_Mutex,
-	shutdown:   bool,
 }
 
 main :: proc() {
@@ -65,32 +57,32 @@ main :: proc() {
 
 	// App
 
-	state := App_State{}
-	state.scene = scenes.idle_init()
-	defer quit_scene(state.scene)
+	scene: Scene = scenes.idle_init()
+	defer quit_scene(scene)
 
-	// server_thread := thread.create_and_start_with_data(&state, start_server)
-	// defer thread.destroy(server_thread)
-
-	defer state.shutdown = true
+	// Set stdin to non-blocking
+	flags := posix.fcntl(posix.STDIN_FILENO, .GETFL, 0)
+	posix.fcntl(posix.STDIN_FILENO, .SETFL, flags | posix.O_NONBLOCK)
+	input: [1]byte
 
 	for !rl.WindowShouldClose() {
-		if sync.rw_mutex_shared_guard(&state.scene_lock) {
-			update(&state)
-			draw(state.scene)
-		}
+		n, err := os.read(os.stdin, input[:])
+		if n > 0 do set_scene(&scene, i32(input[0]))
+		if err == .EOF do break
 
+		update(&scene)
+		draw(scene)
 		free_all(context.temp_allocator)
 	}
 }
 
-update :: proc(state: ^App_State) {
-	if rl.IsKeyPressed(.ZERO) do set_scene(state, 0)
-	if rl.IsKeyPressed(.ONE) do set_scene(state, 1)
-	if rl.IsKeyPressed(.TWO) do set_scene(state, 2)
-	if rl.IsKeyPressed(.THREE) do set_scene(state, 3)
+update :: proc(scene: ^Scene) {
+	if rl.IsKeyPressed(.ZERO) do set_scene(scene, 0)
+	if rl.IsKeyPressed(.ONE) do set_scene(scene, 1)
+	if rl.IsKeyPressed(.TWO) do set_scene(scene, 2)
+	if rl.IsKeyPressed(.THREE) do set_scene(scene, 3)
 
-	switch &s in state.scene {
+	switch &s in scene {
 	case ^scenes.Idle_State:
 		return
 	case ^scenes.Clock_State:
@@ -118,27 +110,27 @@ draw :: proc(scene: Scene) {
 	}
 }
 
-set_scene :: proc(state: ^App_State, value: i32) {
+set_scene :: proc(scene: ^Scene, value: i32) {
 	switch value {
 	case 0:
-		if s, ok := state.scene.(^scenes.Idle_State); !ok {
-			quit_scene(state.scene)
-			state.scene = scenes.idle_init()
+		if s, ok := scene.(^scenes.Idle_State); !ok {
+			quit_scene(scene^)
+			scene^ = scenes.idle_init()
 		}
 	case 1:
-		if s, ok := state.scene.(^scenes.Clock_State); !ok {
-			quit_scene(state.scene)
-			state.scene = scenes.clock_init()
+		if s, ok := scene.(^scenes.Clock_State); !ok {
+			quit_scene(scene^)
+			scene^ = scenes.clock_init()
 		}
 	case 2:
-		if s, ok := state.scene.(^scenes.Media_State); !ok {
-			quit_scene(state.scene)
-			state.scene = scenes.media_init()
+		if s, ok := scene.(^scenes.Media_State); !ok {
+			quit_scene(scene^)
+			scene^ = scenes.media_init()
 		}
 	case 3:
-		if s, ok := state.scene.(^scenes.Visualizer_State); !ok {
-			quit_scene(state.scene)
-			state.scene = scenes.visualizer_init()
+		if s, ok := scene.(^scenes.Visualizer_State); !ok {
+			quit_scene(scene^)
+			scene^ = scenes.visualizer_init()
 		}
 	case:
 		fmt.eprintln("invalid scene value:", value)
@@ -155,42 +147,5 @@ quit_scene :: proc(scene: Scene) {
 		scenes.media_quit(s)
 	case ^scenes.Visualizer_State:
 		scenes.visualizer_quit(s)
-	}
-}
-
-/* Remote Control */
-
-start_server :: proc(data: rawptr) {
-	state := (^App_State)(data)
-
-	socket, err := net.listen_tcp({address = net.IP4_Address{0, 0, 0, 0}, port = 9041})
-	if err != nil {
-		fmt.eprintln("failed to start TCP listener")
-		return
-	}
-
-	fmt.println("started TCP server")
-	defer net.close(socket)
-
-	// Set timeout so accept TCP unblocks periodically for shutdown
-	net.set_option(socket, .Receive_Timeout, time.Second)
-
-	buffer: [4]u8
-
-	for !state.shutdown {
-		client, _, err_accept := net.accept_tcp(socket)
-		if err_accept != nil do continue
-		defer net.close(client)
-
-		bytes_read, err_recv := net.recv_tcp(client, buffer[:])
-		if err_recv != nil {
-			fmt.eprintln("failed to receive data from client")
-			return
-		}
-
-		value := i32(transmute(i32be)buffer)
-		if sync.rw_mutex_guard(&state.scene_lock) {
-			set_scene(state, value)
-		}
 	}
 }

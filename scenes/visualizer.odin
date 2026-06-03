@@ -3,21 +3,28 @@ package scenes
 import "core:fmt"
 import "core:math"
 import "core:math/cmplx"
+import "core:slice"
 import ma "vendor:miniaudio"
 import rl "vendor:raylib"
 
-SAMPLES_LEN :: 1024 // must be power of 2 for FFT
+SAMPLES_LEN :: 1024 // Must be power of 2 for FFT
 BINS_LEN :: (SAMPLES_LEN / 2) + 1 // Based on Nyquist frequency
-FRAMES_LEN :: 2 // number of seconds
+FRAMES_LEN :: 2 // Number of seconds
 
 BARS_LEN :: 80
 MIN_RADIUS :: 90.0
 MAX_RADIUS :: 260.0
-GLOW_LAYERS :: 4 // number of glow passes per bar
-BASS_MAGNITUDES :: 6
+GLOW_LAYERS :: 4 // Number of glow passes per bar
+BASS_BARS :: 12
 HUE_RATE :: 15.0
-MAGNITUDE_DECAY :: 0.9
-BEAT_PULSE_DECAY :: 0.85
+BAR_AUDIO_ATTACK :: 0.6
+BAR_AUDIO_DECAY :: 0.15 // Slow decay with audio
+BAR_SILENCE_DECAY :: 0.9 // Fast decay for silence
+BASS_DECAY :: 0.85
+DB_FLOOR :: 80 // -80db is silence
+
+LO_CUTOFF :: 10
+HI_CUTOFF :: BARS_LEN - 5
 
 Visualizer_State :: struct {
 	audio: struct {
@@ -28,9 +35,10 @@ Visualizer_State :: struct {
 	},
 	video: struct {
 		origin:     rl.Vector2,
-		magnitudes: [BARS_LEN]f32, // smoothed bar heights [0..1]
-		hue_offset: f32, // color rotation over time
-		beat_pulse: f32, // flash intensity on beat
+		bars:       [BARS_LEN]f32,
+		points:     [HI_CUTOFF - LO_CUTOFF + 1]rl.Vector2,
+		hue_offset: f32,
+		bass_pulse: f32,
 		last_bass:  f32,
 	},
 }
@@ -81,18 +89,10 @@ visualizer_update :: proc(state: ^Visualizer_State) {
 	dt := rl.GetFrameTime()
 	count := len(audio.samples)
 
-	fmt.printfln("%v %v", video.hue_offset, video.beat_pulse)
-
-	// Decay toward silence when no audio
+	// Decay rapidly when no audio
 	if count == 0 {
-		video.magnitudes *= MAGNITUDE_DECAY
-
-		if video.beat_pulse > 0.1 {
-			video.beat_pulse *= BEAT_PULSE_DECAY
-		} else {
-			video.beat_pulse = 0
-		}
-
+		video.bars *= BAR_SILENCE_DECAY
+		video.bass_pulse *= BASS_DECAY
 		video.hue_offset += dt * HUE_RATE
 		return
 	}
@@ -100,129 +100,95 @@ visualizer_update :: proc(state: ^Visualizer_State) {
 	sample_mean := math.sum(audio.samples) / f32(count)
 
 	// Preprocess
-	for i in 0 ..< count {
-		sample := audio.samples[i] - sample_mean // Remove DC bias
-		window := 0.5 * (1.0 - math.cos(2.0 * math.PI * f32(i) / f32(count - 1))) // Apply Hann window
+	for &sample, i in audio.samples {
+		sample -= sample_mean // Remove DC bias
+		window := 0.5 * (1 - math.cos(2 * math.PI * f32(i) / f32(count - 1))) // Apply Hann window
 		audio.fft[i] = complex(sample * window, 0)
 	}
 
-	// Zero-pad remainder
-	for i in count ..< SAMPLES_LEN {
-		audio.fft[i] = 0
-	}
+	slice.zero(audio.fft[count:SAMPLES_LEN]) // Zero-pad remainder
 
 	fft(audio.fft[:])
 
-	// Map FFT bins to bars using log-frequency spacing
+	// Map FFT bins to bars using log-frequency spacing to mimic how humans perceive pitch.
 	// Skip DC at 0. Log spacing gives more resolution to bass.
 	bin_low: f32 = 1
 	bin_high: f32 = BINS_LEN - 1
 
-	for bar, i in 0 ..< BARS_LEN {
+	for &bar, i in video.bars {
 		// Log-spaced bin range for this bar
-		t0 := f32(bar) / BARS_LEN
-		t1 := f32(bar + 1) / BARS_LEN
+		t0 := f32(i) / BARS_LEN
+		t1 := f32(i + 1) / BARS_LEN
 
+		// Exponential interpolation
 		lo := bin_low * math.pow(bin_high / bin_low, t0)
 		hi := bin_low * math.pow(bin_high / bin_low, t1)
-		if lo < bin_low do lo = bin_low
-		if hi < lo do hi = lo
-		if hi >= bin_high do hi = bin_high - 1
 
-		// Average magnitude across this bin range
+		lo = math.clamp(lo, bin_low, bin_high - 1)
+		hi = math.clamp(hi, lo, bin_high - 1)
+
+		// Identify peak magnitude across this bin range
 		peak: f32 = 0
-		for value, j in audio.fft[int(lo):int(hi) + 1] {
+		for value in audio.fft[int(lo):int(hi) + 1] {
 			real := cmplx.real(value)
 			imag := cmplx.imag(value)
-			magnitude := math.sqrt(real * real + imag * imag) / SAMPLES_LEN
+
+			// NOTE: Calculate magnitude squared for efficiency, since we only need square root of final peak
+			magnitude := (real * real + imag * imag) / (SAMPLES_LEN * SAMPLES_LEN)
 			if magnitude > peak do peak = magnitude
 		}
 
+		peak = math.sqrt(peak)
+
 		// Convert to dB and normalize
-		db := 20.0 * math.log10(math.max(peak, 1e-6))
-		normalized: f32 = math.clamp((db + 80) / 80, 0, 1)
+		db := 20 * math.log10(math.max(peak, 1e-6)) // Clamp to avoid log10(0) = -inf
+		normalized: f32 = math.clamp((db + DB_FLOOR) / DB_FLOOR, 0, 1)
 
 		// Smooth toward raw values with a fast attack and slow decay
-		factor: f32 = normalized > video.magnitudes[i] ? 0.6 : 0.15
-		video.magnitudes[i] = math.lerp(video.magnitudes[i], normalized, factor)
+		factor: f32 = normalized > bar ? BAR_AUDIO_ATTACK : BAR_AUDIO_DECAY
+		bar = math.lerp(bar, normalized, factor)
 	}
 
 	// Detect beat by comparing current bass energy to previous
-	bass_energy := math.sum(video.magnitudes[:BASS_MAGNITUDES]) / BASS_MAGNITUDES
-	if bass_energy > video.last_bass * 1.3 && bass_energy > 0.3 {
-		video.beat_pulse = 1.0
-	}
-	video.last_bass = math.lerp(video.last_bass, bass_energy, f32(0.1))
-	video.beat_pulse *= BEAT_PULSE_DECAY
+	bass_mean := math.sum(video.bars[:BASS_BARS]) / BASS_BARS
+	if bass_mean > video.last_bass * 1.15 && bass_mean > 0.1 do video.bass_pulse = 1
+
+	video.last_bass = math.lerp(video.last_bass, bass_mean, f32(0.1))
+	video.bass_pulse *= BASS_DECAY
 
 	// Rotate hue faster when there's more energy
-	magnitude_mean := math.sum(video.magnitudes[:]) / BARS_LEN
-	video.hue_offset += dt * (20.0 + magnitude_mean * 60.0)
+	magnitude_mean := math.sum(video.bars[:]) / BARS_LEN
+	video.hue_offset += dt * (20 + magnitude_mean * 60)
 }
 
 visualizer_draw :: proc(state: ^Visualizer_State) {
-	audio := &state.audio
 	video := &state.video
 	origin := video.origin
+	points := &video.points
 
 	rl.ClearBackground(rl.BLACK)
 
-	// Pulse background on beat
-	if video.beat_pulse > 0.01 {
-		pulse_alpha := u8(video.beat_pulse * 18)
-		rl.DrawCircleV(origin, MAX_RADIUS + 60, {255, 200, 100, pulse_alpha})
-	}
-
-	// Radial frequency bars
-	for bar in 0 ..< BARS_LEN {
-		mag := video.magnitudes[bar]
-		if mag < 0.001 do continue
-
-		angle_deg := f32(bar) / f32(BARS_LEN) * 360.0
-		angle_rad := angle_deg * math.PI / 180.0
-
-		// Hue: spread across spectrum + offset rotation
-		hue := math.mod(f32(bar) / f32(BARS_LEN) * 300.0 + video.hue_offset, 360.0)
-		sat := 0.75 + mag * 0.25
-		lit := 0.45 + mag * 0.20
-
-		bar_len := mag * (MAX_RADIUS - MIN_RADIUS)
-		r_inner: f32 = MIN_RADIUS
-		r_outer: f32 = MIN_RADIUS + bar_len
-
-		cos_a := math.cos(angle_rad)
-		sin_a := math.sin(angle_rad)
-
-		p_inner := rl.Vector2{origin.x + cos_a * r_inner, origin.y + sin_a * r_inner}
-		p_outer := rl.Vector2{origin.x + cos_a * r_outer, origin.y + sin_a * r_outer}
-
-		// Draw glow layers (thick→thin, transparent→opaque)
-		for g in 0 ..< GLOW_LAYERS {
-			glow_t := f32(g) / f32(GLOW_LAYERS)
-			glow_w := (1.0 - glow_t) * (6.0 + mag * 8.0)
-			glow_lit := lit * (0.5 + glow_t * 0.5)
-			c := rl.ColorFromHSV(hue, sat, glow_lit)
-			rl.DrawLineEx(p_inner, p_outer, glow_w, c)
+	// Cutoff end frequencies with too much noise and low signal
+	for &bar, i in video.bars[LO_CUTOFF:HI_CUTOFF] {
+		t := f32(i) / len(points)
+		angle := (t * math.TAU) + math.PI / 2
+		radius := f32(MIN_RADIUS) + bar * (MAX_RADIUS - MIN_RADIUS) * 1.4 + video.bass_pulse * 22.0
+		points[i] = rl.Vector2 {
+			origin.x + math.cos(angle) * radius,
+			origin.y + math.sin(angle) * radius,
 		}
-
-		// Bright tip dot
-		tip_r := 2.5 + mag * 4.0
-		tip_c := rl.ColorFromHSV(hue, 0.95, 0.9)
-		rl.DrawCircleV(p_outer, tip_r, tip_c)
 	}
 
-	// // Outer glow
-	// pulse_r := 28.0 + video.beat_pulse * 14.0
-	// for g in 0 ..< 5 {
-	// 	gr := pulse_r + f32(g) * 6.0
-	// 	hue := math.mod(video.hue_offset, 360.0)
-	// 	rl.DrawCircleV(origin, gr, rl.ColorFromHSV(hue, 0.9, 0.6))
-	// }
+	points[len(points) - 1] = points[0]
 
-	// Core
-	// core_hue := math.mod(video.hue_offset, 360.0)
-	// rl.DrawCircleV(origin, pulse_r, rl.ColorFromHSV(core_hue, 0.6, 0.3))
-	// rl.DrawCircleV(origin, pulse_r * 0.55, rl.ColorFromHSV(core_hue, 0.4, 0.85))
+	hue := math.mod(video.hue_offset, 360.0)
+	dim := rl.ColorFromHSV(hue, 0.7, 0.5)
+	lit := rl.ColorFromHSV(hue, 0.4, 1.0)
+
+	for i in 0 ..< (len(points) - 1) {
+		rl.DrawLineEx(points[i], points[i + 1], 4.0, dim)
+		rl.DrawLineEx(points[i], points[i + 1], 1.2, lit)
+	}
 }
 
 capture_callback :: proc "c" (device: ^ma.device, output, input: rawptr, frame_count: u32) {

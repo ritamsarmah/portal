@@ -6,7 +6,8 @@ export
 OUT := build
 PROJECT := portal
 HOST := pi@portal
-REMOTE := $(HOST):/home/pi
+HOME_DIR := /home/pi
+REMOTE := $(HOST):$(HOME_DIR)
 
 RAYLIB_VERSION := 6.0
 
@@ -26,8 +27,8 @@ compile: clean
 # Download and compile miniaudio on Raspberry Pi
 miniaudio:
 	ssh $(HOST) "\
-		mkdir -p /home/pi/miniaudio/lib && \
-		cd /home/pi/miniaudio && \
+		mkdir -p $(HOME_DIR)/miniaudio/lib && \
+		cd $(HOME_DIR)/miniaudio && \
 		wget -q https://raw.githubusercontent.com/mackron/miniaudio/master/miniaudio.c && \
 		wget -q https://raw.githubusercontent.com/mackron/miniaudio/master/miniaudio.h && \
 		$(CC) -c -O2 -fPIC miniaudio.c -o miniaudio.o && \
@@ -50,7 +51,7 @@ raylib:
 
 # Install library dependencies
 dependencies: miniaudio raylib
-	echo "Installed dependencies"
+	@echo "Installed dependencies"
 
 # Deploy to remote device and finish linking
 deploy: compile
@@ -58,8 +59,8 @@ deploy: compile
 	rsync -avz server.sh $(REMOTE)/server.sh
 	ssh $(HOST) "\
 		gcc build/*.o -o portal \
-		-L/home/pi/raylib/src \
-		-L/home/pi/miniaudio/lib \
+		-L$(HOME_DIR)/raylib/src \
+		-L$(HOME_DIR)/miniaudio/lib \
 		-Wl,-Bstatic -lraylib -lminiaudio \
 		-Wl,-Bdynamic -lGLESv2 -lEGL -lgbm -ldrm -latomic -lpthread -lm -lc -lcurl \
 		-dynamic-linker /lib/ld-linux-aarch64.so.1"

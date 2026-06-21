@@ -30,3 +30,11 @@ fi
 ```
 
 3. Reboot. Use `client.sh` to remotely change the scene.
+
+## Troubleshooting
+
+> Audio capture is not working or very quiet.
+
+1. Check if microphone is detected: `arecord -l`.
+2. Use `amixer`to increase the microphone gain. Note, this is device-dependent; reduce the percentage if the input is too noisy. (e.g., `sudo amixer -c 0 sset 'Mic' 90%`)
+

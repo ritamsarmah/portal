@@ -18,18 +18,29 @@ HA_MEDIA_ENTITY=
 HA_TOKEN=
 ```
 
-To run with "remote control" functionality and auto-start on boot:
+6. Start the program using `sudo systemctl start portal.service`
+
+To enable auto-start on boot:
 
 1. Enable console auto-login via `sudo raspi-config` (System Options > Auto Login > Console Autologin)
-2. Copy `server.sh` to the Raspberry Pi and add the following to `.profile`:
+2. Run `sudo systemctl enable portal.service`.
+3. Use `client.sh` to remotely change the scene.
 
-```sh
-if [ "$(tty)" = "/dev/tty1" ]; then
-  exec ./server.sh
-fi
+## Logging
+
+To prevent SD card wear, configure logging to RAM (`/run/log/journal`)
+
+1. Enable `journald` volatile storage with memory limits:
+
+```ini
+# /etc/systemd/journald.conf
+Storage=volatile
+RuntimeMaxUse=50M
+RuntimeKeepFree=10M
 ```
 
-3. Reboot. Use `client.sh` to remotely change the scene.
+2. Restart journald: `sudo systemctl restart systemd-journald`
+3. Verify configuration: `journalctl --disk-usage`
 
 ## Troubleshooting
 

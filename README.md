@@ -2,6 +2,8 @@
 
 A collection of various programs that run on a custom circular display.
 
+![](portal.jpg)
+
 ## Installation
 
 To build and deploy to a Raspberry Pi:

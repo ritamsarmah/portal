@@ -2,9 +2,12 @@ package scenes
 
 import "base:runtime"
 import "core:c"
+import "core:crypto/hash"
+import "core:encoding/hex"
 import "core:encoding/json"
 import "core:fmt"
 import "core:math"
+import "core:math/rand"
 import "core:os"
 import "core:strings"
 import "core:sync"
@@ -12,12 +15,18 @@ import "core:thread"
 import "vendor:curl"
 import rl "vendor:raylib"
 
-POLL_RATE_S :: 4
+POLL_RATE_S :: 3
 ROTATION_RATE :: 32
+
+SUBSONIC_API_VERSION :: "1.16.1"
+SUBSONIC_CLIENT :: "portal"
 
 Media_State :: struct {
 	poll_timer:  f32,
 	poll_thread: ^thread.Thread,
+	api_url:     string,
+	username:    string,
+	password:    string,
 	artwork:     struct {
 		ready:    bool,
 		image:    rl.Image,
@@ -26,25 +35,19 @@ Media_State :: struct {
 		origin:   rl.Vector2,
 		dest:     rl.Rectangle,
 		rotation: f32,
-	},
-	ha:          struct {
-		url:              string,
-		entity:           string,
-		authorization:    cstring,
-		headers:          ^curl.slist,
-		media_content_id: string,
+		id:       string,
 	},
 }
 
-Media_Response :: struct {
-	attributes:   struct {
-		media_title:      string,
-		media_artist:     string,
-		media_album_name: string,
-		media_content_id: string,
-		entity_picture:   string,
-	},
-	last_changed: string,
+Now_Playing_Response :: struct {
+	subsonic_response: struct {
+		now_playing: struct {
+			entry: Maybe([]struct {
+					id:       string,
+					coverArt: string,
+				}),
+		} `json:"nowPlaying"`,
+	} `json:"subsonic-response"`,
 }
 
 media_init :: proc() -> ^Media_State {
@@ -59,16 +62,11 @@ media_init :: proc() -> ^Media_State {
 	state.artwork.origin = {window_width, window_height} / 2
 	state.artwork.dest = {state.artwork.origin.x, state.artwork.origin.y, diameter, diameter}
 
-	state.ha.url = os.get_env("HA_URL", context.allocator)
-	state.ha.entity = os.get_env("HA_MEDIA_ENTITY", context.allocator)
-	state.ha.authorization = fmt.caprintf(
-		"Authorization: Bearer %v",
-		os.get_env("HA_TOKEN", context.temp_allocator),
-	)
-	state.ha.headers = curl.slist_append(state.ha.headers, state.ha.authorization)
-	state.ha.headers = curl.slist_append(state.ha.headers, "Content-Type: application/json")
+	state.api_url = os.get_env("SUBSONIC_URL", context.allocator)
+	state.username = os.get_env("SUBSONIC_USERNAME", context.allocator)
+	state.password = os.get_env("SUBSONIC_PASSWORD", context.allocator)
 
-	fmt.printfln("Home Assistant URL: %s", state.ha.url)
+	fmt.printfln("API URL: %s", state.api_url)
 
 	return state
 }
@@ -76,12 +74,10 @@ media_init :: proc() -> ^Media_State {
 media_quit :: proc(state: ^Media_State) {
 	fmt.println("quitting media scene")
 
-	curl.slist_free_all(state.ha.headers)
-
-	delete(state.ha.authorization)
-	delete(state.ha.entity)
-	delete(state.ha.url)
-	delete(state.ha.media_content_id)
+	delete(state.api_url)
+	delete(state.username)
+	delete(state.password)
+	delete(state.artwork.id)
 
 	rl.UnloadImage(state.artwork.image)
 	rl.UnloadTexture(state.artwork.texture)
@@ -145,70 +141,77 @@ update_artwork :: proc(data: rawptr) {
 	handle := curl.easy_init()
 	defer curl.easy_cleanup(handle)
 
-	// Refresh Spotify entity (since Home Assistant default interval is 30 seconds)
-
-	url := fmt.ctprintf("%v/api/services/script/refresh_spotify", state.ha.url)
-
-	curl.easy_setopt(handle, .URL, url)
-	curl.easy_setopt(handle, .HTTPHEADER, state.ha.headers)
-	curl.easy_setopt(handle, .POST, 1)
-	curl.easy_setopt(handle, .POSTFIELDS, "{}")
-	curl.easy_setopt(handle, .WRITEFUNCTION, write_callback)
-	curl.easy_setopt(handle, .WRITEDATA, &buffer)
-
-	if result := curl.easy_perform(handle); result != .E_OK {
-		fmt.eprintln("error refreshing Spotify:", curl.easy_strerror(result))
-		return
-	}
-
 	// Fetch media player state
 
-	clear(&buffer)
+	// NOTE: Skip url encoding since all parameter values are known to be safe in personal use
+	// https://subsonic.org/pages/api.jsp#getNowPlaying
+	salt, token := salt_password(state.password)
+	url := fmt.ctprintf(
+		"%v/rest/getNowPlaying.view?u=%v&t=%v&s=%v&v=%v&c=%v&f=json",
+		state.api_url,
+		state.username,
+		token,
+		salt,
+		SUBSONIC_API_VERSION,
+		SUBSONIC_CLIENT,
+	)
 
-	url = fmt.ctprintf("%v/api/states/%v", state.ha.url, state.ha.entity)
-
-	curl.easy_reset(handle)
 	curl.easy_setopt(handle, .URL, url)
-	curl.easy_setopt(handle, .HTTPHEADER, state.ha.headers)
 	curl.easy_setopt(handle, .WRITEFUNCTION, write_callback)
 	curl.easy_setopt(handle, .WRITEDATA, &buffer)
+	curl.easy_setopt(handle, .SSL_VERIFYPEER, false)
+	curl.easy_setopt(handle, .SSL_VERIFYHOST, false)
 
 	if result := curl.easy_perform(handle); result != .E_OK {
-		fmt.eprintln("error fetching Home Assistant media state:", curl.easy_strerror(result))
+		fmt.eprintln("error fetching media player state:", curl.easy_strerror(result))
 		return
 	}
 
-	response: Media_Response
+	response: Now_Playing_Response
 	json.unmarshal(buffer[:], &response, allocator = context.temp_allocator)
 
-	// Check if media changed since last update
-	if response.attributes.media_content_id == state.ha.media_content_id ||
-	   response.attributes.media_title == "" {
-		return
-	}
+	entries, is_playing := response.subsonic_response.now_playing.entry.?
+	if !is_playing || len(entries) == 0 do return
 
-	delete(state.ha.media_content_id)
-	state.ha.media_content_id = strings.clone(response.attributes.media_content_id)
+	artwork_id := entries[0].coverArt
+
+	// Check if cover art has changed since last update
+	if artwork_id == state.artwork.id do return
+
+	delete(state.artwork.id)
+	state.artwork.id = strings.clone(artwork_id)
 
 	// Download artwork
 
 	clear(&buffer)
 
-	url = fmt.ctprintf("%v%v", state.ha.url, response.attributes.entity_picture)
+	// https://subsonic.org/pages/api.jsp#getCoverArt
+	salt, token = salt_password(state.password)
+	url = fmt.ctprintf(
+		"%v/rest/getCoverArt.view?u=%v&t=%v&s=%v&v=%v&c=%v&id=%v&size=%v",
+		state.api_url,
+		state.username,
+		token,
+		salt,
+		SUBSONIC_API_VERSION,
+		SUBSONIC_CLIENT,
+		artwork_id,
+		rl.GetScreenWidth(),
+	)
 
 	curl.easy_reset(handle)
 	curl.easy_setopt(handle, .URL, url)
-	curl.easy_setopt(handle, .HTTPHEADER, state.ha.headers)
-	curl.easy_setopt(handle, .FOLLOWLOCATION, 1)
 	curl.easy_setopt(handle, .WRITEFUNCTION, write_callback)
 	curl.easy_setopt(handle, .WRITEDATA, &buffer)
+	curl.easy_setopt(handle, .SSL_VERIFYPEER, false)
+	curl.easy_setopt(handle, .SSL_VERIFYHOST, false)
 
 	if result := curl.easy_perform(handle); result != .E_OK {
 		fmt.eprintln("error downloading artwork:", curl.easy_strerror(result))
 		return
 	}
 
-	fmt.println("media player state changed:", response.attributes)
+	fmt.println("album artwork changed")
 
 	if sync.mutex_guard(&state.artwork.mu) {
 		rl.UnloadImage(state.artwork.image)
@@ -228,4 +231,16 @@ write_callback :: proc "c" (
 	total := size * nitems
 	append(response, ..buffer[:total])
 	return total
+}
+
+@(private)
+salt_password :: proc(password: string, allocator := context.temp_allocator) -> (string, string) {
+	salt_bytes: [16]u8
+	_ = rand.read(salt_bytes[:])
+
+	salt := string(hex.encode(salt_bytes[:], allocator))
+	salted := strings.concatenate({password, salt}, allocator)
+	token := hash.hash(.Insecure_MD5, salted, allocator)
+
+	return salt, string(hex.encode(token[:], allocator))
 }

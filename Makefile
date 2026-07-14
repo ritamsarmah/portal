@@ -61,7 +61,7 @@ deploy: compile
 	rsync -avz portal.service $(REMOTE)/portal.service
 	ssh $(HOST) "sudo ln -sf /home/pi/portal.service /etc/systemd/system"
 	ssh $(HOST) "\
-		gcc build/*.o -o portal \
+		gcc build/*.obj -o portal \
 		-L$(HOME_DIR)/raylib/src \
 		-L$(HOME_DIR)/miniaudio/lib \
 		-Wl,-Bstatic -lraylib -lminiaudio \

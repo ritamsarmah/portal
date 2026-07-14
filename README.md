@@ -15,9 +15,10 @@ To build and deploy to a Raspberry Pi:
 5. Add `.env` file with following information:
 
 ```
-HA_URL=
-HA_MEDIA_ENTITY=
-HA_TOKEN=
+# For media scene 
+SUBSONIC_URL=
+SUBSONIC_USERNAME=
+SUBSONIC_PASSWORD=
 ```
 
 6. Start the program using `sudo systemctl start portal.service`

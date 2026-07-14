@@ -127,7 +127,7 @@ draw :: proc(scene: Scene) {
 	rl.BeginDrawing()
 	defer rl.EndDrawing()
 
-	switch &s in scene {
+	switch s in scene {
 	case ^scenes.Idle_State:
 		scenes.idle_draw(s)
 	case ^scenes.Clock_State:
